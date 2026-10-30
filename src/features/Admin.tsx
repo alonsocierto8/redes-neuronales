@@ -1,5 +1,150 @@
-import { useState } from 'react'
-import { Activity, Bell, Check, LockKeyhole, Save, Shield, SlidersHorizontal, Users } from 'lucide-react'
-import { PageHeader, Card, CardTitle, Badge, Button } from '../components/Primitives'
-const initialUsers=[{name:'Ana Torres',email:'ana.torres@demo.local',role:'Administradora',status:'Activo'},{name:'Carlos Ruiz',email:'carlos.ruiz@demo.local',role:'Ingeniero de IA',status:'Activo'},{name:'María León',email:'maria.leon@demo.local',role:'Revisora',status:'Activo'},{name:'Diego Pérez',email:'diego.perez@demo.local',role:'Lector',status:'Invitado'}]
-export default function Admin(){const [users,setUsers]=useState(initialUsers);const [maxJobs,setMaxJobs]=useState('3');const [maxDataset,setMaxDataset]=useState('250');const [retention,setRetention]=useState('90');const [saved,setSaved]=useState(false);return <div className="page-wrap"><PageHeader eyebrow="M10 · ADMINISTRATION & SECURITY" title="Administración y seguridad" description="Panel visual de usuarios, roles, límites de recursos y controles operativos." action={<Badge tone="amber">Modo demo · Sin seguridad real</Badge>}/><div className="admin-warning"><LockKeyhole size={19}/><div><b>Controles de demostración</b><p>Los roles y ajustes mostrados no aplican autorización real ni se guardan en servidor. La seguridad debe implementarse y verificarse en la API.</p></div></div><div className="admin-stats"><Card><Users size={18}/><span>Usuarios demo</span><b>{users.length}</b></Card><Card><Shield size={18}/><span>Roles configurados</span><b>5</b></Card><Card><Activity size={18}/><span>Eventos de auditoría</span><b>24</b></Card><Card><Bell size={18}/><span>Alertas pendientes</span><b>02</b></Card></div><div className="admin-grid"><Card className="table-card"><CardTitle title="Usuarios y roles" subtitle="Identidades de ejemplo" action={<Badge tone="blue">RBAC · Vista</Badge>}/><div className="table-scroll"><table><thead><tr><th>Usuario</th><th>Rol</th><th>Estado</th><th>Acceso</th></tr></thead><tbody>{users.map((u,i)=><tr key={u.email}><td><div className="project-cell"><div className="user-avatar">{u.name.split(' ').map(s=>s[0]).join('')}</div><div><b>{u.name}</b><small>{u.email}</small></div></div></td><td><select className="inline-status" value={u.role} onChange={e=>setUsers(old=>old.map((x,j)=>i===j?{...x,role:e.target.value}:x))}>{['Administradora','Responsable de proyecto','Ingeniero de IA','Revisora','Lector'].map(r=><option key={r}>{r}</option>)}</select></td><td><Badge tone={u.status==='Activo'?'green':'amber'}>{u.status}</Badge></td><td><Badge tone="neutral">Demo</Badge></td></tr>)}</tbody></table></div></Card><Card><CardTitle title="Límites de recursos" subtitle="Valores editables localmente" action={<SlidersHorizontal size={17} className="muted-icon"/>}/><div className="properties-form"><label>Trabajos concurrentes<select value={maxJobs} onChange={e=>{setMaxJobs(e.target.value);setSaved(false)}}>{['1','2','3','5','10'].map(x=><option key={x}>{x}</option>)}</select></label><label>Tamaño máximo de dataset (MB)<input type="number" min="1" max="10000" value={maxDataset} onChange={e=>{setMaxDataset(e.target.value);setSaved(false)}}/></label><label>Retención de logs (días)<select value={retention} onChange={e=>{setRetention(e.target.value);setSaved(false)}}>{['7','30','90','180','365'].map(x=><option key={x}>{x}</option>)}</select></label><Button onClick={()=>setSaved(true)} icon={saved?<Check size={15}/>:<Save size={15}/>}>{saved?'Ajustes simulados':'Guardar ajustes'}</Button>{saved&&<p className="inline-notice">Ajustes aplicados únicamente al estado de esta vista.</p>}</div></Card></div><Card className="table-card audit-card"><CardTitle title="Registro de auditoría" subtitle="Actividad ilustrativa · no persistente" action={<Badge tone="amber">Muestra</Badge>}/><div className="table-scroll"><table><thead><tr><th>Evento</th><th>Actor</th><th>Recurso</th><th>Fecha</th><th>Resultado</th></tr></thead><tbody>{[['training.started','Carlos Ruiz','JOB-1048','Hoy, 09:42','Aceptado'],['model.version.approved','Ana Torres','MDL-201','Hoy, 09:48','Aceptado'],['dataset.registered','María León','DS-003','20 oct, 10:50','Pendiente'],['project.created','Ana Torres','PRJ-004','19 oct, 14:26','Aceptado']].map(r=><tr key={r[0]}><td><code>{r[0]}</code></td><td>{r[1]}</td><td>{r[2]}</td><td className="muted-cell">{r[3]}</td><td><Badge tone={r[4]==='Aceptado'?'green':'amber'}>{r[4]}</Badge></td></tr>)}</tbody></table></div></Card></div>}
+import { useEffect, useState } from 'react'
+import { Activity, Check, LockKeyhole, Save, Shield, SlidersHorizontal, Users } from 'lucide-react'
+import { PageHeader, Card, CardTitle, Badge, Button, EmptyState } from '../components/Primitives'
+import {
+  api,
+  type AdminHealth,
+  type AdminSettings,
+  type ApiAdminUser,
+} from '../lib/api'
+
+interface AuditEvent {
+  id: number
+  actor_id: number | null
+  project_id: number | null
+  action: string
+  created_at: string
+}
+
+const roles = ['Administrador', 'Responsable de proyecto', 'Ingeniero de IA', 'Revisor', 'Lector']
+const initialSettings: AdminSettings = { max_active_jobs: 1, max_upload_mb: 100, retention_days: 90 }
+
+export default function Admin({ currentUserRole }: { currentUserRole: string | null }) {
+  const [users, setUsers] = useState<ApiAdminUser[]>([])
+  const [settings, setSettings] = useState(initialSettings)
+  const [events, setEvents] = useState<AuditEvent[]>([])
+  const [health, setHealth] = useState<AdminHealth | null>(null)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (currentUserRole !== 'Administrador') {
+      setLoading(false)
+      return
+    }
+    let active = true
+    Promise.all([
+      api.listAdminUsers(),
+      api.getAdminSettings(),
+      api.listAdminAudit(),
+      api.adminHealth(),
+    ]).then(([userRows, savedSettings, auditRows, status]) => {
+      if (!active) return
+      setUsers(userRows)
+      setSettings(savedSettings)
+      setEvents(auditRows)
+      setHealth(status)
+    }).catch(cause => {
+      if (active) setError(cause instanceof Error ? cause.message : 'No se pudo cargar la administración.')
+    }).finally(() => {
+      if (active) setLoading(false)
+    })
+    return () => { active = false }
+  }, [currentUserRole])
+
+  async function changeRole(userId: number, role: string) {
+    try {
+      const updated = await api.updateUserRole(userId, role)
+      setUsers(current => current.map(user => user.id === userId ? updated : user))
+      setError('')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No se pudo actualizar el rol.')
+    }
+  }
+
+  async function changeStatus(userId: number, status: string) {
+    try {
+      const updated = await api.updateUserStatus(userId, status)
+      setUsers(current => current.map(user => user.id === userId ? updated : user))
+      setError('')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No se pudo actualizar el estado.')
+    }
+  }
+
+  async function saveSettings() {
+    setSaving(true)
+    try {
+      setSettings(await api.saveAdminSettings(settings))
+      setEvents(await api.listAdminAudit())
+      setError('')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No se pudieron guardar los ajustes.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (currentUserRole !== 'Administrador') {
+    return <div className="page-wrap">
+      <PageHeader eyebrow="M10 · ADMINISTRATION" title="Administración y seguridad" description="Configuración global y control de acceso."/>
+      <Card><EmptyState title="Acceso restringido" detail="Solo una cuenta con rol Administrador puede consultar este módulo."/></Card>
+    </div>
+  }
+
+  return <div className="page-wrap">
+    <PageHeader
+      eyebrow="M10 · ADMINISTRATION & SECURITY"
+      title="Administración y seguridad"
+      description="Usuarios, roles, límites operativos y auditoría persistidos por la API."
+      action={<Badge tone={health?.worker === 'online' ? 'green' : 'amber'}>Worker {health?.worker || '…'}</Badge>}
+    />
+    {error && <p className="auth-error" role="alert">{error}</p>}
+    {loading ? <Card><EmptyState title="Cargando controles" detail="Consultando usuarios, configuración y auditoría del servidor."/></Card> : <>
+      <div className="admin-stats">
+        <Card><Users size={18}/><span>Usuarios</span><b>{users.length}</b></Card>
+        <Card><Shield size={18}/><span>Roles configurados</span><b>{roles.length}</b></Card>
+        <Card><Activity size={18}/><span>Eventos de auditoría</span><b>{events.length}</b></Card>
+        <Card><LockKeyhole size={18}/><span>API / Base de datos</span><b>{health?.api === 'ok' && health.database === 'connected' ? 'Operativo' : 'Revisar'}</b></Card>
+      </div>
+      <div className="admin-grid">
+        <Card className="table-card">
+          <CardTitle title="Usuarios y roles" subtitle="Cambios validados y auditados en el backend"/>
+          <div className="table-scroll"><table>
+            <thead><tr><th>Usuario</th><th>Correo</th><th>Rol</th><th>Estado</th></tr></thead>
+            <tbody>{users.map(user => <tr key={user.id}>
+              <td><b>{user.display_name}</b></td>
+              <td>{user.email}</td>
+              <td><select className="inline-status" value={user.role} onChange={event => changeRole(user.id, event.target.value)}>
+                {roles.map(role => <option key={role}>{role}</option>)}
+              </select></td>
+              <td><select className="inline-status" value={user.status} onChange={event => changeStatus(user.id, event.target.value)}>
+                <option>Activo</option><option>Suspendido</option>
+              </select></td>
+            </tr>)}</tbody>
+          </table></div>
+        </Card>
+        <Card>
+          <CardTitle title="Límites de recursos" subtitle="Se aplican a nuevas cargas y trabajos." action={<SlidersHorizontal size={17} className="muted-icon"/>}/>
+          <div className="properties-form">
+            <label>Trabajos concurrentes<input type="number" min="1" max="10" value={settings.max_active_jobs} onChange={event => setSettings({ ...settings, max_active_jobs: Number(event.target.value) })}/></label>
+            <label>Tamaño máximo de dataset (MB)<input type="number" min="10" max="100" value={settings.max_upload_mb} onChange={event => setSettings({ ...settings, max_upload_mb: Number(event.target.value) })}/></label>
+            <label>Retención (días)<input type="number" min="7" max="365" value={settings.retention_days} onChange={event => setSettings({ ...settings, retention_days: Number(event.target.value) })}/></label>
+            <Button disabled={saving} onClick={saveSettings} icon={saving ? <Save size={15}/> : <Check size={15}/>}>{saving ? 'Guardando…' : 'Guardar ajustes'}</Button>
+          </div>
+        </Card>
+      </div>
+      <Card className="table-card audit-card">
+        <CardTitle title="Registro de auditoría" subtitle="Eventos recientes persistidos en el servidor"/>
+        <div className="table-scroll"><table>
+          <thead><tr><th>Evento</th><th>Actor</th><th>Proyecto</th><th>Fecha</th></tr></thead>
+          <tbody>{events.map(event => <tr key={event.id}>
+            <td><code>{event.action}</code></td><td>{event.actor_id ?? 'Sistema'}</td>
+            <td>{event.project_id ?? '—'}</td><td>{new Date(event.created_at).toLocaleString()}</td>
+          </tr>)}</tbody>
+        </table></div>
+      </Card>
+    </>}
+  </div>
+}

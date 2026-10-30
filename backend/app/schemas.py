@@ -50,7 +50,7 @@ class ProjectResponse(BaseModel):
     progress: int = 0
 
 
-class CNNLayer(BaseModel):
+class ArchitectureLayer(BaseModel):
     type: Literal["Conv2D", "MaxPooling2D", "Flatten", "Dense", "Dropout"]
     filters: int | None = Field(default=None, ge=1, le=512)
     units: int | None = Field(default=None, ge=1, le=4096)
@@ -63,33 +63,52 @@ class ArchitectureCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=2, max_length=160)
-    input_height: int = Field(ge=16, le=2048)
-    input_width: int = Field(ge=16, le=2048)
+    family: Literal["CNN", "Feedforward"] = "CNN"
+    input_height: int | None = Field(default=None, ge=16, le=2048)
+    input_width: int | None = Field(default=None, ge=16, le=2048)
     input_channels: Literal[1, 3, 4] = 3
-    layers: list[CNNLayer] = Field(min_length=3, max_length=32)
+    input_features: int | None = Field(default=None, ge=1, le=4096)
+    layers: list[ArchitectureLayer] = Field(min_length=2, max_length=32)
 
     @model_validator(mode="after")
-    def validate_cnn_graph(self):
+    def validate_graph(self):
         types = [layer.type for layer in self.layers]
-        if types[0] != "Conv2D":
-            raise ValueError("Una CNN debe iniciar con una capa Conv2D.")
-        if types[-1] != "Dense":
-            raise ValueError("Una CNN debe terminar con una capa Dense de salida.")
-        if types.count("Flatten") != 1 or types.index("Flatten") < 1:
-            raise ValueError("La CNN requiere exactamente una capa Flatten después de las convoluciones.")
-        flatten_index = types.index("Flatten")
-        if any(t in {"Conv2D", "MaxPooling2D"} for t in types[flatten_index + 1 :]):
-            raise ValueError("Las capas convolucionales deben ir antes de Flatten.")
-        if any(t == "Flatten" for t in types[:flatten_index] + types[flatten_index + 1 :]):
-            raise ValueError("Solo se permite una capa Flatten.")
+        if types[-1] != "Dense" or self.layers[-1].units is None or self.layers[-1].units < 2:
+            raise ValueError("La arquitectura debe terminar con una capa Dense de al menos dos salidas.")
+        if self.layers[-1].activation != "softmax":
+            raise ValueError("La capa de salida debe usar softmax para clasificación multiclase.")
         if any(t == "Dropout" and self.layers[i].rate is None for i, t in enumerate(types)):
             raise ValueError("Cada capa Dropout necesita rate.")
-        if any(t == "Conv2D" and self.layers[i].filters is None for i, t in enumerate(types)):
-            raise ValueError("Cada capa Conv2D necesita filters.")
         if any(t == "Dense" and self.layers[i].units is None for i, t in enumerate(types)):
             raise ValueError("Cada capa Dense necesita units.")
-        if any(t == "Conv2D" and self.layers[i].kernel_size is None for i, t in enumerate(types)):
-            raise ValueError("Cada capa Conv2D necesita kernel_size.")
+
+        if self.family == "CNN":
+            if self.input_height is None or self.input_width is None:
+                raise ValueError("La CNN requiere alto y ancho de entrada.")
+            if types[0] != "Conv2D":
+                raise ValueError("Una CNN debe iniciar con una capa Conv2D.")
+            if types.count("Flatten") != 1 or types.index("Flatten") < 1:
+                raise ValueError("La CNN requiere exactamente una capa Flatten después de las convoluciones.")
+            flatten_index = types.index("Flatten")
+            if any(t in {"Conv2D", "MaxPooling2D"} for t in types[flatten_index + 1 :]):
+                raise ValueError("Las capas convolucionales deben ir antes de Flatten.")
+            if any(t == "Conv2D" and self.layers[i].filters is None for i, t in enumerate(types)):
+                raise ValueError("Cada capa Conv2D necesita filters.")
+            if any(t == "Conv2D" and self.layers[i].kernel_size is None for i, t in enumerate(types)):
+                raise ValueError("Cada capa Conv2D necesita kernel_size.")
+            if self.input_features is not None:
+                raise ValueError("Una CNN no usa input_features.")
+        else:
+            if self.input_features is None:
+                raise ValueError("La red Feedforward requiere el número de características de entrada.")
+            if any(t not in {"Dense", "Dropout"} for t in types):
+                raise ValueError("Feedforward solo admite capas Dense y Dropout.")
+            if not any(t == "Dense" for t in types[:-1]):
+                raise ValueError("Feedforward necesita al menos una capa Dense oculta.")
+            if any(t == "Dense" and self.layers[i].activation == "softmax" for i, t in enumerate(types[:-1])):
+                raise ValueError("Softmax solo se permite en la capa de salida.")
+            if self.input_height is not None or self.input_width is not None:
+                raise ValueError("Feedforward usa input_features, no dimensiones de imagen.")
         return self
 
 

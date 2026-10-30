@@ -1,12 +1,14 @@
 import hashlib
 import hmac
 import json
+import csv
+import math
 import os
 import secrets
 import time
 import zipfile
 from datetime import datetime, timezone
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import PurePosixPath
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
@@ -170,9 +172,23 @@ def _project_response(project: models.Project) -> ProjectResponse:
     )
 
 
+def _architecture_response(architecture: models.Architecture) -> ArchitectureResponse:
+    config = decode_json(architecture.config_json)
+    config["family"] = architecture.family
+    return ArchitectureResponse(
+        id=architecture.id,
+        project_id=architecture.project_id,
+        name=architecture.name,
+        family=architecture.family,
+        version=architecture.version,
+        config=config,
+    )
+
+
 def _job_response(db: Session, job: models.TrainingJob) -> dict:
     project = db.get(models.Project, job.project_id)
     dataset = db.get(models.Dataset, job.dataset_id)
+    architecture = db.get(models.Architecture, job.architecture_id)
     labels = {
         "QUEUED": "En cola",
         "PREPARING": "Preparando",
@@ -184,7 +200,7 @@ def _job_response(db: Session, job: models.TrainingJob) -> dict:
     return {
         "id": str(job.id),
         "project": project.name,
-        "family": "CNN",
+        "family": architecture.family,
         "status": labels.get(job.status, job.status),
         "progress": job.progress,
         "epoch": job.epoch,
@@ -384,14 +400,7 @@ def list_architectures(
 ):
     _project_access(db, user, project_id)
     return [
-        ArchitectureResponse(
-            id=row.id,
-            project_id=row.project_id,
-            name=row.name,
-            family="CNN",
-            version=row.version,
-            config=decode_json(row.config_json),
-        )
+        _architecture_response(row)
         for row in db.scalars(
             select(models.Architecture)
             .where(models.Architecture.project_id == project_id)
@@ -418,6 +427,7 @@ def save_architecture(
     architecture = models.Architecture(
         project_id=project_id,
         name=body.name.strip(),
+        family=body.family,
         config_json=json.dumps(config),
         version=(last_version or 0) + 1,
     )
@@ -426,14 +436,7 @@ def save_architecture(
     _audit(db, user, "architecture.created", project_id, {"architecture_id": architecture.id})
     db.commit()
     db.refresh(architecture)
-    return ArchitectureResponse(
-        id=architecture.id,
-        project_id=project_id,
-        name=architecture.name,
-        family="CNN",
-        version=architecture.version,
-        config=config,
-    )
+    return _architecture_response(architecture)
 
 
 def _validate_dataset_archive(data: bytes) -> dict:
@@ -474,29 +477,126 @@ def _validate_dataset_archive(data: bytes) -> dict:
             status_code=400,
             detail="Una CNN de clasificación requiere imágenes en al menos dos carpetas de clase dentro del ZIP.",
         )
-    return {"classes": sorted(class_names), "class_count": len(class_names), "images": image_count}
+    if len(class_names) > 4096:
+        raise HTTPException(status_code=400, detail="El dataset CNN no puede tener más de 4096 clases.")
+    return {
+        "family": "CNN",
+        "classes": sorted(class_names),
+        "class_count": len(class_names),
+        "images": image_count,
+    }
+
+
+def _validate_tabular_csv(data: bytes, target_column: str | None) -> dict:
+    try:
+        text = data.decode("utf-8-sig")
+        rows = list(csv.reader(StringIO(text)))
+    except (UnicodeDecodeError, csv.Error):
+        raise HTTPException(status_code=400, detail="El archivo debe ser un CSV UTF-8 válido.") from None
+    if len(rows) < 4:
+        raise HTTPException(status_code=400, detail="El CSV requiere encabezado y al menos tres filas.")
+    headers = [header.strip() for header in rows[0]]
+    if not headers or any(not header for header in headers) or len(set(headers)) != len(headers):
+        raise HTTPException(status_code=400, detail="El CSV requiere nombres de columna únicos y no vacíos.")
+    if not target_column or target_column not in headers:
+        raise HTTPException(status_code=400, detail="Selecciona una columna objetivo existente en el CSV.")
+    feature_names = [header for header in headers if header != target_column]
+    if not feature_names or len(feature_names) > 4096:
+        raise HTTPException(status_code=400, detail="El CSV debe tener entre 1 y 4096 características.")
+    target_index = headers.index(target_column)
+    feature_indices = [headers.index(header) for header in feature_names]
+    classes: set[str] = set()
+    class_counts: dict[str, int] = {}
+    row_count = 0
+    for row in rows[1:]:
+        if len(row) != len(headers):
+            raise HTTPException(status_code=400, detail="Todas las filas del CSV deben tener el mismo número de columnas.")
+        label = row[target_index].strip()
+        if not label:
+            raise HTTPException(status_code=400, detail="La columna objetivo no puede contener valores vacíos.")
+        for index in feature_indices:
+            try:
+                value = float(row[index])
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"La característica {headers[index]} debe ser numérica.") from None
+            if not math.isfinite(value):
+                raise HTTPException(status_code=400, detail="El CSV no puede contener valores numéricos infinitos o NaN.")
+        row_count += 1
+        class_counts[label] = class_counts.get(label, 0) + 1
+        if len(class_counts) > 1000:
+            raise HTTPException(status_code=400, detail="El conjunto de clases excede el máximo permitido.")
+    if len(class_counts) < 2:
+        raise HTTPException(status_code=400, detail="La clasificación requiere al menos dos clases.")
+    if min(class_counts.values()) < 3:
+        raise HTTPException(status_code=400, detail="Cada clase necesita al menos tres filas para separar entrenamiento, validación y prueba.")
+    return {
+        "family": "Feedforward",
+        "target_column": target_column,
+        "feature_names": feature_names,
+        "classes": sorted(class_counts),
+        "class_count": len(class_counts),
+        "rows": row_count,
+    }
+
+
+def _dataset_architecture_config(family: str, dataset_id: int, dataset_name: str, metadata: dict) -> dict:
+    classes = metadata["classes"]
+    if family == "Feedforward":
+        feature_count = len(metadata["feature_names"])
+        return {
+            "family": family,
+            "name": f"Auto · {dataset_name}"[:160],
+            "input_features": feature_count,
+            "generated_for_dataset_id": dataset_id,
+            "layers": [
+                {"type": "Dense", "units": max(8, min(128, feature_count * 2)), "activation": "relu"},
+                {"type": "Dense", "units": len(classes), "activation": "softmax"},
+            ],
+        }
+    return {
+        "family": family,
+        "name": f"Auto · {dataset_name}"[:160],
+        "input_height": 64,
+        "input_width": 64,
+        "input_channels": 3,
+        "generated_for_dataset_id": dataset_id,
+        "layers": [
+            {"type": "Conv2D", "filters": 32, "kernel_size": 3, "activation": "relu"},
+            {"type": "MaxPooling2D"},
+            {"type": "Flatten"},
+            {"type": "Dense", "units": len(classes), "activation": "softmax"},
+        ],
+    }
 
 
 @app.post("/api/v1/projects/{project_id}/datasets", response_model=DatasetResponse, status_code=201)
 async def upload_dataset(
     project_id: int,
     name: str = Form(min_length=2, max_length=160),
+    family: str = Form(default="CNN"),
+    target_column: str | None = Form(default=None),
     file: UploadFile = File(...),
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     _project_access(db, user, project_id, write=True)
     filename = safe_filename(file.filename or "dataset.zip")
-    if not filename.lower().endswith(".zip"):
-        raise HTTPException(status_code=400, detail="Para CNN se requiere un ZIP con carpetas de imágenes por clase.")
+    if family not in {"CNN", "Feedforward"}:
+        raise HTTPException(status_code=422, detail="La familia de dataset no es válida.")
+    expected_extension = ".zip" if family == "CNN" else ".csv"
+    if not filename.lower().endswith(expected_extension):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Para {family} se requiere un archivo {expected_extension.upper()}.",
+        )
     upload_setting = db.get(models.SystemSetting, "max_upload_mb")
     upload_limit = int(upload_setting.value) * 1024 * 1024 if upload_setting else MAX_UPLOAD_BYTES
     content = await file.read(upload_limit + 1)
     if len(content) > upload_limit:
         raise HTTPException(status_code=413, detail=f"El tamaño máximo de carga es {upload_limit // (1024 * 1024)} MB.")
-    metadata = _validate_dataset_archive(content)
+    metadata = _validate_dataset_archive(content) if family == "CNN" else _validate_tabular_csv(content, target_column)
     storage_key = secrets.token_hex(24)
-    (UPLOAD_DIR / f"{storage_key}.zip").write_bytes(content)
+    (UPLOAD_DIR / f"{storage_key}{expected_extension}").write_bytes(content)
     version = (db.scalar(
         select(models.Dataset.version)
         .where(models.Dataset.project_id == project_id, models.Dataset.name == name.strip())
@@ -513,7 +613,30 @@ async def upload_dataset(
     )
     db.add(dataset)
     db.flush()
+    architecture_config = _dataset_architecture_config(family, dataset.id, dataset.name, metadata)
+    last_architecture_version = db.scalar(
+        select(models.Architecture.version)
+        .where(models.Architecture.project_id == project_id)
+        .order_by(models.Architecture.version.desc())
+        .limit(1)
+    ) or 0
+    architecture = models.Architecture(
+        project_id=project_id,
+        name=architecture_config["name"],
+        family=family,
+        config_json=json.dumps(architecture_config),
+        version=last_architecture_version + 1,
+    )
+    db.add(architecture)
+    db.flush()
     _audit(db, user, "dataset.uploaded", project_id, {"dataset_id": dataset.id})
+    _audit(
+        db,
+        user,
+        "architecture.auto_created",
+        project_id,
+        {"architecture_id": architecture.id, "dataset_id": dataset.id},
+    )
     db.commit()
     return DatasetResponse(
         id=dataset.id,
@@ -559,7 +682,8 @@ def delete_dataset(
     _project_access(db, user, dataset.project_id, write=True)
     if db.scalar(select(models.TrainingJob.id).where(models.TrainingJob.dataset_id == dataset_id)):
         raise HTTPException(status_code=409, detail="No se puede eliminar un dataset asociado a entrenamientos.")
-    (UPLOAD_DIR / f"{dataset.storage_key}.zip").unlink(missing_ok=True)
+    extension = ".csv" if decode_json(dataset.metadata_json).get("family") == "Feedforward" else ".zip"
+    (UPLOAD_DIR / f"{dataset.storage_key}{extension}").unlink(missing_ok=True)
     _audit(db, user, "dataset.deleted", dataset.project_id, {"dataset_id": dataset.id})
     db.delete(dataset)
     db.commit()
@@ -588,7 +712,7 @@ def project_report_pdf(
     document = SimpleDocTemplate(output, pagesize=letter, title=f"NeuroLab · {project.name}")
     styles = getSampleStyleSheet()
     content = [
-        Paragraph("NeuroLab Enterprise · Informe de proyecto CNN", styles["Title"]),
+        Paragraph("NeuroLab Enterprise · Informe de proyecto", styles["Title"]),
         Spacer(1, 12),
         Paragraph(f"Proyecto: {project.name}", styles["Heading2"]),
         Paragraph(f"Descripción: {project.description or 'Sin descripción'}", styles["BodyText"]),
@@ -603,7 +727,7 @@ def project_report_pdf(
                 *[
                     [
                         architecture.name,
-                        "CNN",
+                        architecture.family,
                         str(architecture.version),
                         f"{decode_json(architecture.config_json).get('input_height')}×{decode_json(architecture.config_json).get('input_width')}×{decode_json(architecture.config_json).get('input_channels')}",
                         str(len(decode_json(architecture.config_json).get("layers", []))),
@@ -696,13 +820,18 @@ def create_training_job(
     architecture = db.get(models.Architecture, body.architecture_id)
     dataset = db.get(models.Dataset, body.dataset_id)
     if architecture is None or architecture.project_id != project_id:
-        raise HTTPException(status_code=400, detail="Selecciona una arquitectura CNN válida del proyecto.")
+        raise HTTPException(status_code=400, detail="Selecciona una arquitectura válida del proyecto.")
     if dataset is None or dataset.project_id != project_id or dataset.status != "Validado":
         raise HTTPException(status_code=400, detail="Selecciona un dataset válido del proyecto.")
+    metadata = decode_json(dataset.metadata_json)
+    if metadata.get("family", "CNN") != architecture.family:
+        raise HTTPException(status_code=400, detail="La arquitectura y el dataset deben pertenecer a la misma familia.")
     config = decode_json(architecture.config_json)
     output_units = next(layer["units"] for layer in reversed(config["layers"]) if layer["type"] == "Dense")
-    if output_units != len(decode_json(dataset.metadata_json).get("classes", [])):
+    if output_units != len(metadata.get("classes", [])):
         raise HTTPException(status_code=400, detail="Las unidades de salida deben coincidir con las clases del dataset.")
+    if architecture.family == "Feedforward" and config.get("input_features") != len(metadata.get("feature_names", [])):
+        raise HTTPException(status_code=400, detail="Las entradas Feedforward deben coincidir con las características del dataset.")
     setting = db.get(models.SystemSetting, "max_active_jobs")
     max_active_jobs = int(setting.value) if setting else 1
     active_jobs = db.scalar(
@@ -831,12 +960,13 @@ def list_models(
         .order_by(models.ModelVersion.created_at.desc())
     ):
         job = db.get(models.TrainingJob, model.job_id)
+        job_architecture = db.get(models.Architecture, job.architecture_id)
         result.append(
             {
                 "id": str(model.id),
-                "name": f"CNN · entrenamiento {job.id}",
+                "name": f"{job_architecture.family} · entrenamiento {job.id}",
                 "version": f"v{model.version}.0.0",
-                "family": "CNN",
+                "family": job_architecture.family,
                 "status": model.status,
                 "accuracy": (job.accuracy or 0) * 100,
                 "date": model.created_at.isoformat(),
@@ -917,7 +1047,8 @@ def download_model(
         raise HTTPException(status_code=404, detail="El artefacto del modelo no está disponible.")
     _audit(db, user, "model.downloaded", version.project_id, {"model_id": version.id})
     db.commit()
-    return FileResponse(path, filename=f"neurolab-cnn-v{version.version}.keras", media_type="application/octet-stream")
+    family = db.get(models.Architecture, db.get(models.TrainingJob, version.job_id).architecture_id).family.lower()
+    return FileResponse(path, filename=f"neurolab-{family}-v{version.version}.keras", media_type="application/octet-stream")
 
 
 @app.get("/api/v1/projects/{project_id}/audit-events")

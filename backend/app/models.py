@@ -49,7 +49,7 @@ class Architecture(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
     name: Mapped[str] = mapped_column(String(160))
-    family: Mapped[str] = mapped_column(String(8), default="CNN")
+    family: Mapped[str] = mapped_column(String(24), default="CNN")
     config_json: Mapped[str] = mapped_column(Text)
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)

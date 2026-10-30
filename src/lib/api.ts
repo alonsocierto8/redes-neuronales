@@ -1,4 +1,4 @@
-import type { Dataset, Job, ModelVersion, Project } from '../types'
+import type { Dataset, Family, Job, ModelVersion, Project } from '../types'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api/v1'
 const TOKEN_KEY = 'neurolab.access-token'
@@ -15,15 +15,16 @@ export interface ApiArchitecture {
   id: number
   project_id: number
   name: string
-  family: 'CNN'
+  family: Family
   version: number
-  config: CnnArchitecture
+  config: NeuralArchitecture
 }
 export interface SavedArchitecture {
   id: number
   projectId: string
   name: string
-  config: CnnArchitecture
+  family: Family
+  config: NeuralArchitecture
 }
 
 export interface CnnLayerConfig {
@@ -36,12 +37,29 @@ export interface CnnLayerConfig {
 }
 
 export interface CnnArchitecture {
+  family: 'CNN'
   name: string
+  generated_for_dataset_id?: number
   input_height: number
   input_width: number
   input_channels: 1 | 3 | 4
   layers: CnnLayerConfig[]
 }
+
+export interface FeedforwardArchitecture {
+  family: 'Feedforward'
+  name: string
+  generated_for_dataset_id?: number
+  input_features: number
+  layers: Array<{
+    type: 'Dense' | 'Dropout'
+    units?: number
+    activation?: 'relu' | 'softmax' | 'sigmoid' | 'tanh' | 'linear'
+    rate?: number
+  }>
+}
+
+export type NeuralArchitecture = CnnArchitecture | FeedforwardArchitecture
 
 export interface ApiDataset {
   id: number
@@ -50,7 +68,14 @@ export interface ApiDataset {
   filename: string
   version: number
   status: string
-  metadata: { classes: string[]; class_count: number; images: number }
+  metadata: {
+    family?: Family
+    classes: string[]
+    class_count: number
+    images?: number
+    rows?: number
+    feature_names?: string[]
+  }
 }
 export interface TrainingMetric {
   epoch: number
@@ -96,9 +121,9 @@ export const api = {
   },
   me: () => request<AuthUser>('/auth/me'),
   listProjects: () => request<Project[]>('/projects'),
-  createProject: (body: { name: string; description: string; family: 'CNN' }) =>
+  createProject: (body: { name: string; description: string; family: Family }) =>
     request<Project>('/projects', { method: 'POST', body: JSON.stringify(body) }),
-  updateProject: (id: string, body: { name: string; description: string; family: 'CNN' }) =>
+  updateProject: (id: string, body: { name: string; description: string; family: Family }) =>
     request<Project>(`/projects/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   listMembers: (projectId: string) => request<ApiMember[]>(`/projects/${projectId}/members`),
   addMember: (projectId: string, email: string, role: string) =>
@@ -106,18 +131,21 @@ export const api = {
   removeMember: (projectId: string, userId: number) =>
     request<void>(`/projects/${projectId}/members/${userId}`, { method: 'DELETE' }),
   listJobs: () => request<Job[]>('/training-jobs'),
+  getTrainingJob: (id: string) => request<Job>(`/training-jobs/${id}`),
   listDatasets: (projectId: string) => request<ApiDataset[]>(`/projects/${projectId}/datasets`),
   listArchitectures: (projectId: string) => request<ApiArchitecture[]>(`/projects/${projectId}/architectures`),
   listModels: (projectId: string) => request<ModelVersion[]>(`/projects/${projectId}/models`),
   listMetrics: (jobId: string) => request<TrainingMetric[]>(`/training-jobs/${jobId}/metrics`),
-  uploadDataset: (projectId: string, name: string, file: File) => {
+  uploadDataset: (projectId: string, name: string, file: File, family: Family, targetColumn?: string) => {
     const body = new FormData()
     body.set('name', name)
+    body.set('family', family)
+    if (targetColumn) body.set('target_column', targetColumn)
     body.set('file', file)
     return request<ApiDataset>(`/projects/${projectId}/datasets`, { method: 'POST', body })
   },
   deleteDataset: (id: string) => request<void>(`/datasets/${id}`, { method: 'DELETE' }),
-  saveArchitecture: (projectId: string, body: CnnArchitecture) =>
+  saveArchitecture: (projectId: string, body: NeuralArchitecture) =>
     request<ApiArchitecture>(`/projects/${projectId}/architectures`, {
       method: 'POST',
       body: JSON.stringify(body),
@@ -167,7 +195,7 @@ export const api = {
     return response.blob()
   },
   listAdminUsers: () => request<ApiAdminUser[]>('/admin/users'),
-  listAdminAudit: () => request<Array<{ id: number; actor_id: number; project_id: number | null; action: string; created_at: string }>>('/admin/audit-events'),
+  listAdminAudit: () => request<Array<{ id: number; actor_id: number | null; project_id: number | null; action: string; created_at: string }>>('/admin/audit-events'),
   getAdminSettings: () => request<AdminSettings>('/admin/settings'),
   saveAdminSettings: (settings: AdminSettings) => request<AdminSettings>('/admin/settings', {
     method: 'PATCH',
@@ -181,13 +209,15 @@ export const api = {
 }
 
 export function mapDataset(dataset: ApiDataset): Dataset {
+  const family = dataset.metadata.family || 'CNN'
   return {
     id: String(dataset.id),
     projectId: String(dataset.project_id),
     name: dataset.name,
-    rows: String(dataset.metadata.images),
+    family,
+    rows: String(dataset.metadata.images ?? dataset.metadata.rows ?? 0),
     features: dataset.metadata.class_count,
-    format: 'Imágenes',
+    format: family === 'CNN' ? 'ZIP · imágenes' : 'CSV · tabular',
     status: dataset.status,
     updated: `v${dataset.version}`,
   }
@@ -198,11 +228,12 @@ export function mapArchitecture(architecture: ApiArchitecture) {
     id: architecture.id,
     projectId: String(architecture.project_id),
     name: architecture.name,
+    family: architecture.family,
     config: architecture.config,
   }
 }
 
-export async function watchTraining(
+async function streamTrainingEvents(
   jobId: string,
   onUpdate: (job: Job) => void,
   signal: AbortSignal,
@@ -214,6 +245,9 @@ export async function watchTraining(
   })
   if (!response.ok || !response.body) {
     const body = await response.json().catch(() => null) as { detail?: string } | null
+    if ([401, 403, 404].includes(response.status)) {
+      throw new Error(`HTTP ${response.status}: ${body?.detail || 'No tienes acceso al seguimiento del entrenamiento.'}`)
+    }
     throw new Error(body?.detail || 'No se pudo conectar al seguimiento del entrenamiento.')
   }
   const reader = response.body.getReader()
@@ -228,6 +262,49 @@ export async function watchTraining(
     for (const event of events) {
       const data = event.split('\n').find(line => line.startsWith('data: '))?.slice(6)
       if (data) onUpdate(JSON.parse(data) as Job)
+    }
+  }
+
+}
+
+export async function watchTraining(
+  jobId: string,
+  onUpdate: (job: Job) => void,
+  signal: AbortSignal,
+  onReconnect?: () => void,
+) {
+  let retryDelay = 1000
+  let notified = false
+  while (!signal.aborted) {
+    try {
+      await streamTrainingEvents(jobId, onUpdate, signal)
+      if (signal.aborted) return
+      const current = await api.getTrainingJob(jobId)
+      onUpdate(current)
+      if (['Completado', 'Fallido', 'Cancelado'].includes(current.status)) return
+      throw new Error('El seguimiento se interrumpió; se intentará restablecer.')
+    } catch (error) {
+      if (signal.aborted) return
+      if (error instanceof Error && (/^HTTP (401|403|404):/.test(error.message) || /sesión|permiso|No se encontró el entrenamiento/i.test(error.message))) {
+        throw error
+      }
+      if (!notified) {
+        notified = true
+        onReconnect?.()
+      }
+      await new Promise<void>(resolve => {
+        let timeout: number
+        const onAbort = () => {
+          window.clearTimeout(timeout)
+          resolve()
+        }
+        timeout = window.setTimeout(() => {
+          signal.removeEventListener('abort', onAbort)
+          resolve()
+        }, retryDelay)
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+      retryDelay = Math.min(retryDelay * 2, 15000)
     }
   }
 }

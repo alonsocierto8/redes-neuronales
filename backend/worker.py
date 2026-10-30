@@ -1,3 +1,4 @@
+import csv
 import json
 import logging
 import os
@@ -72,7 +73,7 @@ def _train(job_id: int) -> None:
                 job.status = "FAILED"
                 job.error_message = (
                     "TensorFlow no está instalado en el entorno del worker. "
-                    "Instala backend/requirements-ml.txt en Linux/WSL para ejecutar CNN."
+                    "Instala backend/requirements-ml.txt para ejecutar entrenamientos."
                 )
                 job.ended_at = datetime.now(timezone.utc)
         logger.exception("TensorFlow is unavailable; job %s failed", job_id)
@@ -87,44 +88,94 @@ def _train(job_id: int) -> None:
         if architecture is None or dataset is None:
             raise ValueError("No se encontró la arquitectura o el dataset.")
         config = json.loads(architecture.config_json)
-        archive_path = UPLOAD_DIR / f"{dataset.storage_key}.zip"
+        metadata = json.loads(dataset.metadata_json)
+        family = architecture.family
+        suffix = ".csv" if family == "Feedforward" else ".zip"
+        dataset_path = UPLOAD_DIR / f"{dataset.storage_key}{suffix}"
         project_id = job.project_id
         epochs = job.epochs
         batch_size = job.batch_size
         optimizer_name = job.optimizer
 
-    extract_dir = WORK_DIR / f"job-{job_id}"
-    extract_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive_path) as archive:
-        root_dirs = {
-            PurePosixPath(item.filename.replace("\\", "/")).parts[0]
-            for item in archive.infolist()
-            if PurePosixPath(item.filename.replace("\\", "/")).parts
-        }
-        for item in archive.infolist():
-            path = PurePosixPath(item.filename.replace("\\", "/"))
-            if path.is_absolute() or ".." in path.parts:
-                raise ValueError("El dataset contiene una ruta no permitida.")
-        archive.extractall(extract_dir)
-    dataset_root = extract_dir / next(iter(root_dirs)) if len(root_dirs) == 1 else extract_dir
-    config_ds = tf.keras.utils.image_dataset_from_directory(
-        dataset_root,
-        image_size=(config["input_height"], config["input_width"]),
-        batch_size=batch_size,
-        label_mode="int",
-        validation_split=0.2,
-        subset="both",
-        seed=42,
-        color_mode={1: "grayscale", 3: "rgb", 4: "rgba"}[config["input_channels"]],
-    )
-    train_ds, validation_ds = config_ds
-    class_count = len(train_ds.class_names)
     layer_specs = config["layers"]
     output = next(layer for layer in reversed(layer_specs) if layer["type"] == "Dense")
-    if output["units"] != class_count:
-        raise ValueError("La salida de la CNN no coincide con las clases del dataset.")
-    inputs = tf.keras.Input(shape=(config["input_height"], config["input_width"], config["input_channels"]))
+    classes = metadata.get("classes", [])
+    if output["units"] != len(classes):
+        raise ValueError("La salida de la arquitectura no coincide con las clases del dataset.")
+
+    extract_dir = WORK_DIR / f"job-{job_id}"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    test_ds = None
+    if family == "Feedforward":
+        import numpy as np
+
+        with dataset_path.open(encoding="utf-8-sig", newline="") as source:
+            reader = csv.DictReader(source)
+            rows = list(reader)
+        feature_names = metadata["feature_names"]
+        target_column = metadata["target_column"]
+        features = np.asarray(
+            [[float(row[name]) for name in feature_names] for row in rows],
+            dtype=np.float32,
+        )
+        class_indices = {name: index for index, name in enumerate(classes)}
+        labels = np.asarray([class_indices[row[target_column]] for row in rows], dtype=np.int64)
+        rng = np.random.default_rng(42)
+        train_indices: list[int] = []
+        validation_indices: list[int] = []
+        test_indices: list[int] = []
+        for class_index in range(len(classes)):
+            indices = np.flatnonzero(labels == class_index)
+            rng.shuffle(indices)
+            train_count = max(1, int(len(indices) * 0.7))
+            validation_count = max(1, int(len(indices) * 0.15))
+            if train_count + validation_count >= len(indices):
+                train_count = len(indices) - 2
+                validation_count = 1
+            train_indices.extend(indices[:train_count].tolist())
+            validation_indices.extend(indices[train_count : train_count + validation_count].tolist())
+            test_indices.extend(indices[train_count + validation_count :].tolist())
+        normalization = tf.keras.layers.Normalization(axis=-1)
+        normalization.adapt(features[train_indices])
+        inputs = tf.keras.Input(shape=(config["input_features"],))
+        train_ds = tf.data.Dataset.from_tensor_slices(
+            (features[train_indices], labels[train_indices])
+        ).shuffle(len(train_indices), seed=42).batch(batch_size)
+        validation_ds = tf.data.Dataset.from_tensor_slices(
+            (features[validation_indices], labels[validation_indices])
+        ).batch(batch_size)
+        test_ds = tf.data.Dataset.from_tensor_slices(
+            (features[test_indices], labels[test_indices])
+        ).batch(batch_size)
+    else:
+        with zipfile.ZipFile(dataset_path) as archive:
+            root_dirs = {
+                PurePosixPath(item.filename.replace("\\", "/")).parts[0]
+                for item in archive.infolist()
+                if PurePosixPath(item.filename.replace("\\", "/")).parts
+            }
+            for item in archive.infolist():
+                path = PurePosixPath(item.filename.replace("\\", "/"))
+                if path.is_absolute() or ".." in path.parts:
+                    raise ValueError("El dataset contiene una ruta no permitida.")
+            archive.extractall(extract_dir)
+        dataset_root = extract_dir / next(iter(root_dirs)) if len(root_dirs) == 1 else extract_dir
+        train_ds, validation_ds = tf.keras.utils.image_dataset_from_directory(
+            dataset_root,
+            image_size=(config["input_height"], config["input_width"]),
+            batch_size=batch_size,
+            label_mode="int",
+            validation_split=0.2,
+            subset="both",
+            seed=42,
+            color_mode={1: "grayscale", 3: "rgb", 4: "rgba"}[config["input_channels"]],
+        )
+        inputs = tf.keras.Input(
+            shape=(config["input_height"], config["input_width"], config["input_channels"])
+        )
     value = inputs
+    if family == "Feedforward":
+        value = normalization(inputs)
     for spec in layer_specs:
         layer_type = spec["type"]
         if layer_type == "Conv2D":
@@ -199,6 +250,32 @@ def _train(job_id: int) -> None:
         callbacks=[ProgressCallback()],
         verbose=0,
     )
+    with SessionLocal() as db:
+        current_job = db.get(models.TrainingJob, job_id)
+        cancelled = current_job is None or current_job.cancel_requested or current_job.status == "CANCELLED"
+    if test_ds is not None and not cancelled:
+        test_loss, test_accuracy = model.evaluate(test_ds, verbose=0)
+        with SessionLocal.begin() as db:
+            current_job = db.get(models.TrainingJob, job_id)
+            if current_job is not None:
+                current_job.loss = float(test_loss)
+                current_job.accuracy = float(test_accuracy)
+            db.add_all(
+                [
+                    models.TrainingMetric(
+                        job_id=job_id,
+                        epoch=epochs + 1,
+                        metric_name="test_loss",
+                        metric_value=float(test_loss),
+                    ),
+                    models.TrainingMetric(
+                        job_id=job_id,
+                        epoch=epochs + 1,
+                        metric_name="test_accuracy",
+                        metric_value=float(test_accuracy),
+                    ),
+                ]
+            )
     with SessionLocal.begin() as db:
         job = db.get(models.TrainingJob, job_id)
         if job is None:
@@ -220,12 +297,11 @@ def _train(job_id: int) -> None:
         )
     logger.info("Training job %s finished", job_id)
     import shutil
-
     shutil.rmtree(extract_dir, ignore_errors=True)
 
 
 def run_worker(poll_seconds: float = 2):
-    logger.info("NeuroLab CNN worker started")
+    logger.info("NeuroLab TensorFlow worker started")
     last_heartbeat = 0.0
     while True:
         if time.monotonic() - last_heartbeat >= 5:

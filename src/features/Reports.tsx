@@ -33,30 +33,30 @@ export default function Reports({ projects, jobs, models }: { projects: Project[
       setError(cause instanceof Error ? cause.message : 'No se pudo exportar el informe PDF.')
     }
   }
-  const exportJobs = () => downloadCsv('neurolab-entrenamientos-cnn.csv', [
+  const exportJobs = () => downloadCsv('neurolab-entrenamientos.csv', [
     ['ID', 'Proyecto', 'Familia', 'Estado', 'Progreso', 'Epoca', 'Epocas', 'Loss', 'Accuracy', 'Dataset'],
-    ...jobs.map(job => [job.id, job.project, 'CNN', job.status, String(job.progress), String(job.epoch), String(job.epochs), String(job.loss), String(job.accuracy), job.dataset]),
+    ...jobs.map(job => [job.id, job.project, job.family, job.status, String(job.progress), String(job.epoch), String(job.epochs), String(job.loss), String(job.accuracy), job.dataset]),
   ])
-  const exportModels = () => downloadCsv('neurolab-modelos-cnn.csv', [
+  const exportModels = () => downloadCsv('neurolab-modelos.csv', [
     ['ID', 'Nombre', 'Version', 'Familia', 'Estado', 'Accuracy', 'Fecha', 'Job', 'SHA256'],
-    ...models.map(model => [model.id, model.name, model.version, 'CNN', model.status, String(model.accuracy), model.date, model.jobId, model.checksum || '']),
+    ...models.map(model => [model.id, model.name, model.version, model.family, model.status, String(model.accuracy), model.date, model.jobId, model.checksum || '']),
   ])
-  const exportProjects = () => downloadCsv('neurolab-proyectos-cnn.csv', [
+  const exportProjects = () => downloadCsv('neurolab-proyectos.csv', [
     ['ID', 'Nombre', 'Descripcion', 'Familia', 'Estado', 'Responsable'],
-    ...projects.map(project => [project.id, project.name, project.description, 'CNN', project.status, project.owner]),
+    ...projects.map(project => [project.id, project.name, project.description, project.family, project.status, project.owner]),
   ])
 
   return <div className="page-wrap">
-    <PageHeader eyebrow="M09 · CNN REPORTING" title="Reportes" description="Exporta el historial CNN persistido y la ficha de cada proyecto."/>
-    <div className="report-hero"><div className="report-hero-icon"><FileBarChart size={26}/></div><div><Badge tone="purple">CENTRO DE REPORTES CNN</Badge><h2>Resultados trazables, exportables y autorizados.</h2><p>Los CSV se generan desde los datos de sesión; el PDF reúne proyecto, arquitectura e historial desde el backend.</p></div></div>
+    <PageHeader eyebrow="M09 · REPORTING" title="Reportes" description="Exporta entrenamientos, modelos y proyectos persistidos."/>
+    <div className="report-hero"><div className="report-hero-icon"><FileBarChart size={26}/></div><div><Badge tone="purple">CENTRO DE REPORTES</Badge><h2>Resultados trazables, exportables y autorizados.</h2><p>Los CSV se generan desde los datos de sesión; el PDF reúne proyecto, arquitectura e historial desde el backend.</p></div></div>
     <div className="report-grid">
-      <Card className="report-card"><div className="report-icon"><FileText size={20}/></div><Badge tone="blue">CSV · EJECUCIONES</Badge><h3>Historial de entrenamientos CNN</h3><p>Estado, época, pérdida, exactitud y dataset asociados a cada ejecución.</p><div className="report-meta"><span>{jobs.length} registros</span><span>CSV UTF-8</span></div><Button variant="secondary" onClick={exportJobs} icon={<Download size={15}/>}>Exportar entrenamientos</Button></Card>
-      <Card className="report-card"><div className="report-icon green"><ShieldCheck size={20}/></div><Badge tone="green">CSV · VERSIONES</Badge><h3>Registro de modelos CNN</h3><p>Versiones inmutables, revisión, métricas y checksum SHA-256.</p><div className="report-meta"><span>{models.length} registros</span><span>SHA-256</span></div><Button variant="secondary" onClick={exportModels} icon={<Download size={15}/>}>Exportar modelos</Button></Card>
-      <Card className="report-card"><div className="report-icon amber"><History size={20}/></div><Badge tone="amber">CSV · PROYECTOS</Badge><h3>Ficha de proyectos CNN</h3><p>Proyectos autorizados, descripción, responsable y estado.</p><div className="report-meta"><span>{projects.length} registros</span><span>CSV UTF-8</span></div><Button variant="secondary" onClick={exportProjects} icon={<Download size={15}/>}>Exportar proyectos</Button></Card>
+      <Card className="report-card"><div className="report-icon"><FileText size={20}/></div><Badge tone="blue">CSV · EJECUCIONES</Badge><h3>Historial de entrenamientos</h3><p>Estado, época, pérdida, exactitud, familia y dataset asociados a cada ejecución.</p><div className="report-meta"><span>{jobs.length} registros</span><span>CSV UTF-8</span></div><Button variant="secondary" onClick={exportJobs} icon={<Download size={15}/>}>Exportar entrenamientos</Button></Card>
+      <Card className="report-card"><div className="report-icon green"><ShieldCheck size={20}/></div><Badge tone="green">CSV · VERSIONES</Badge><h3>Registro de modelos</h3><p>Versiones inmutables, revisión, métricas y checksum SHA-256.</p><div className="report-meta"><span>{models.length} registros</span><span>SHA-256</span></div><Button variant="secondary" onClick={exportModels} icon={<Download size={15}/>}>Exportar modelos</Button></Card>
+      <Card className="report-card"><div className="report-icon amber"><History size={20}/></div><Badge tone="amber">CSV · PROYECTOS</Badge><h3>Ficha de proyectos</h3><p>Proyectos autorizados, descripción, responsable y estado.</p><div className="report-meta"><span>{projects.length} registros</span><span>CSV UTF-8</span></div><Button variant="secondary" onClick={exportProjects} icon={<Download size={15}/>}>Exportar proyectos</Button></Card>
     </div>
     <Card className="report-checklist"><CardTitle title="Informe de proyecto" subtitle="PDF generado en el servidor con auditoría de la exportación"/>
       <div className="properties-form"><label>Proyecto<select value={projectId} onChange={event => setProjectId(event.target.value)}>{projects.map(project => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label><Button disabled={!projectId} onClick={exportPdf} icon={<Download size={15}/>}>Descargar PDF</Button>{error&&<p className="auth-error" role="alert">{error}</p>}</div>
-      <div className="checklist-grid">{[['Ficha de proyecto','PDF'],['Resumen de arquitectura CNN','PDF'],['Historial de entrenamiento','CSV y PDF'],['Registro de modelos','CSV'],['Auditoría de exportaciones','Persistente'],['Descarga de artefactos','Con permiso']].map(([title,detail])=><div className="check-item" key={title}><span className="check-circle">✓</span><div><b>{title}</b><small>{detail}</small></div></div>)}</div>
+      <div className="checklist-grid">{[['Ficha de proyecto','PDF'],['Resumen de arquitecturas','PDF'],['Historial de entrenamiento','CSV y PDF'],['Registro de modelos','CSV'],['Auditoría de exportaciones','Persistente'],['Descarga de artefactos','Con permiso']].map(([title,detail])=><div className="check-item" key={title}><span className="check-circle">✓</span><div><b>{title}</b><small>{detail}</small></div></div>)}</div>
     </Card>
   </div>
 }
