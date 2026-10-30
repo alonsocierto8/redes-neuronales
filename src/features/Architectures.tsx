@@ -1,24 +1,148 @@
 import { useMemo, useState } from 'react'
-import { Activity, ArrowDown, ArrowDownToLine, ArrowUp, Check, CircleHelp, Copy, Layers3, Plus, RotateCcw, Trash2, Workflow } from 'lucide-react'
-import type { Family, Layer, Project } from '../types'
+import { ArrowDown, Check, CircleHelp, Layers3, Plus, RotateCcw, Trash2 } from 'lucide-react'
+import type { Layer, Project } from '../types'
+import type { CnnArchitecture } from '../lib/api'
 import { PageHeader, Card, CardTitle, Badge, Button } from '../components/Primitives'
 
-const initialLayers:Layer[]=[{id:'l1',type:'Entrada',units:20,activation:'Lineal',shape:'20 características'},{id:'l2',type:'Densa',units:64,activation:'ReLU',shape:'64 unidades'},{id:'l3',type:'Densa',units:32,activation:'ReLU',shape:'32 unidades'},{id:'l4',type:'Salida',units:1,activation:'Sigmoid',shape:'1 salida'}]
-const familyNotes:Record<Family,string>={Feedforward:'Flujo unidireccional entre capas. Adecuada para clasificación y regresión tabular.',RNN:'Diseñada para secuencias. En una implementación real, la forma de entrada debe incluir pasos temporales.',CNN:'Utiliza capas convolucionales y de pooling. En producción requiere una forma de entrada espacial, por ejemplo alto × ancho × canales.',GAN:'Arquitectura generativa compuesta por generador y discriminador. Requiere objetivos y pérdidas específicas.'}
-export default function Architectures({projects,onSave}:{projects:Project[];onSave:(family:Family,layers:Layer[])=>void}) {
- const [family,setFamily]=useState<Family>('Feedforward');const [layers,setLayers]=useState<Layer[]>(initialLayers);const [selected,setSelected]=useState('l2');const [project,setProject]=useState(projects[0]?.id||'');const [valid,setValid]=useState(false);const [notice,setNotice]=useState('')
- const active=layers.find(l=>l.id===selected)
- const params=useMemo(()=>layers.reduce((sum,l)=>sum+l.units*(l.type==='Entrada'?0:1),0),[layers])
- function patch(id:string,key:keyof Layer,value:string|number){setLayers(old=>old.map(l=>l.id===id?{...l,[key]:value}:l));setValid(false)}
- function addLayer(){const id=`layer-${Date.now()}`;const next:Layer={id,type:'Densa',units:32,activation:'ReLU',shape:'32 unidades'};const at=Math.max(1,layers.length-1);setLayers(old=>[...old.slice(0,at),next,...old.slice(at)]);setSelected(id);setValid(false)}
- function removeLayer(id:string){if(layers.length<=2){setNotice('La arquitectura debe conservar al menos una entrada y una salida.');return}setLayers(old=>old.filter(l=>l.id!==id));setSelected('l2');setValid(false)}
- function validate(){if(layers.length<2||layers[0].type!=='Entrada'||layers[layers.length-1].type!=='Salida'){setNotice('La arquitectura debe comenzar con Entrada y terminar con Salida.');setValid(false)}else if(layers.some(l=>l.units<1||l.units>4096)){setNotice('Cada capa debe tener entre 1 y 4096 unidades.');setValid(false)}else{setNotice('Validación visual completada. Esto no sustituye la validación del backend.');setValid(true)}}
- function changeFamily(v:Family){setFamily(v);setValid(false);if(v==='Feedforward')setLayers(initialLayers);else if(v==='RNN')setLayers([{...initialLayers[0],shape:'pasos × características'},{id:'rnn1',type:'Recurrente',units:64,activation:'Tanh',shape:'secuencia de 64'},{...initialLayers[3],id:'out-rnn'}]);else if(v==='CNN')setLayers([{id:'img',type:'Entrada',units:3,activation:'Lineal',shape:'64 × 64 × 3'},{id:'conv',type:'Convolucional',units:32,activation:'ReLU',shape:'mapas de características'},{id:'pool',type:'Pooling',units:16,activation:'—',shape:'reducción espacial'},{id:'dense-cnn',type:'Densa',units:64,activation:'ReLU',shape:'64 unidades'},{id:'out-cnn',type:'Salida',units:10,activation:'Softmax',shape:'10 clases'}]);else setLayers([{id:'gen',type:'Generador',units:128,activation:'ReLU',shape:'datos sintéticos'},{id:'disc',type:'Discriminador',units:64,activation:'Sigmoid',shape:'real / generado'}]);setSelected('l2')}
- return <div className="page-wrap"><PageHeader eyebrow="M04 · MODEL DESIGNER" title="Diseñador de arquitecturas" description="Configura capas, unidades y activaciones con una vista previa de la estructura." action={<Button variant="secondary" onClick={()=>{setLayers(initialLayers);setFamily('Feedforward');setValid(false);setNotice('Diseño restablecido.')}} icon={<RotateCcw size={15}/>}>Restablecer</Button>}/>
- <div className="designer-toolbar"><label className="inline-select">Proyecto<select value={project} onChange={e=>setProject(e.target.value)}>{projects.map(p=><option value={p.id} key={p.id}>{p.name}</option>)}</select></label><div className="family-selector">{(['Feedforward','RNN','CNN','GAN'] as Family[]).map(f=><button className={family===f?'family-active':''} onClick={()=>changeFamily(f)} key={f}>{f}</button>)}</div><span className="demo-label"><span className="pulse-dot"/> Constructor local</span></div>
- <div className="designer-grid"><Card className="layers-panel"><CardTitle title="Capas" subtitle={`${layers.length} componentes`} action={<button className="small-icon-button" onClick={addLayer} aria-label="Agregar capa"><Plus size={16}/></button>}/><div className="layer-stack">{layers.map((l,i)=><div key={l.id}><button className={`layer-node ${selected===l.id?'layer-selected':''}`} onClick={()=>setSelected(l.id)}><span className={`layer-type-icon layer-type-${l.type==='Entrada'?'input':l.type==='Salida'?'output':'hidden'}`}><Layers3 size={16}/></span><span className="layer-node-copy"><b>{l.type}</b><small>{l.units} unidades · {l.activation}</small></span><span className="layer-index">{String(i+1).padStart(2,'0')}</span></button>{i<layers.length-1&&<div className="layer-connector"><ArrowDown size={14}/></div>}</div>)}</div><button className="add-layer-btn" onClick={addLayer}><Plus size={15}/> Añadir capa oculta</button><div className="layer-hint"><CircleHelp size={14}/> Selecciona una capa para editar sus propiedades.</div></Card>
- <Card className="canvas-panel"><CardTitle title="Vista de arquitectura" subtitle="Representación esquemática de las conexiones" action={<Badge tone={valid?'green':'neutral'}>{valid?'Validada localmente':'Borrador'}</Badge>}/><div className="architecture-canvas"><div className="canvas-grid-bg"/><div className="network-visual">{layers.map((l,i)=><div className="network-col" key={l.id}><span className="network-label">{l.type}</span><div className="network-neurons">{Array.from({length:Math.min(5,Math.max(2,l.units>32?5:Math.ceil(l.units/8)))},(_,j)=><span key={j} className={`network-neuron ${selected===l.id?'neuron-selected':''}`} onClick={()=>setSelected(l.id)} title={`${l.type} · ${l.units} unidades`}/>)}</div><span className="network-units">{l.units} unidades</span>{i<layers.length-1&&<div className="connection-lines">{Array.from({length:9},(_,j)=><i key={j} style={{top:`${8+j*10}%`,transform:`rotate(${(j-4)*4}deg)`}}/>)}</div>}</div>)}</div><div className="canvas-legend"><span><i className="legend-dot purple-dot"/> Capa seleccionada</span><span><i className="legend-line"/> Conexión conceptual</span></div></div><div className="canvas-summary"><div><span>Familia</span><b>{family}</b></div><div><span>Capas</span><b>{layers.length}</b></div><div><span>Parámetros estimados*</span><b>{params.toLocaleString('es-PE')}</b></div><div><span>Salida</span><b>{layers[layers.length-1]?.activation||'—'}</b></div></div><p className="tiny-note">*Estimación ilustrativa del frontend; no equivale al recuento de parámetros de TensorFlow/Keras.</p></Card>
- <Card className="properties-panel"><CardTitle title="Propiedades" subtitle={active?`Capa ${layers.findIndex(l=>l.id===selected)+1}`:'Selecciona una capa'}/>{active?<div className="properties-form"><label>Nombre / tipo<select value={active.type} onChange={e=>patch(active.id,'type',e.target.value)}>{['Entrada','Densa','Recurrente','Convolucional','Pooling','Generador','Discriminador','Salida'].map(t=><option key={t}>{t}</option>)}</select></label><label>Unidades<input type="number" min="1" max="4096" value={active.units} onChange={e=>patch(active.id,'units',Number(e.target.value))}/><small>Rango de demostración: 1–4096</small></label><label>Activación<select value={active.activation} onChange={e=>patch(active.id,'activation',e.target.value)}>{['Lineal','ReLU','Sigmoid','Tanh','Softmax','LeakyReLU','—'].map(a=><option key={a}>{a}</option>)}</select></label><label>Forma / descripción<input value={active.shape} onChange={e=>patch(active.id,'shape',e.target.value)}/></label><div className="property-actions">{active.type!=='Entrada'&&active.type!=='Salida'&&<Button variant="danger" onClick={()=>removeLayer(active.id)} icon={<Trash2 size={14}/>}>Eliminar capa</Button>}</div></div>:<p className="muted-cell">Selecciona un nodo del diseño.</p>}<div className="family-info"><b><CircleHelp size={14}/> Nota de familia</b><p>{familyNotes[family]}</p></div></Card></div>
- <div className="designer-footer"><div className="validation-message">{notice&&<><span className={valid?'validation-ok':'validation-warn'}>{valid?<Check size={15}/>:<CircleHelp size={15}/>}</span>{notice}</>}</div><div className="footer-actions"><Button variant="secondary" onClick={validate} icon={<Check size={15}/>}>Validar diseño</Button><Button onClick={()=>{onSave(family,layers);setNotice('Configuración registrada en el estado local de la aplicación.');}} icon={<ArrowDownToLine size={15}/>}>Guardar arquitectura</Button></div></div>
- </div>
+const initialLayers: Layer[] = [
+  { id: 'conv-1', type: 'Conv2D', units: 32, filters: 32, kernelSize: 3, activation: 'relu', shape: '32 filtros · kernel 3×3' },
+  { id: 'pool-1', type: 'MaxPooling2D', units: 0, activation: 'linear', shape: 'Pooling 2×2' },
+  { id: 'flatten-1', type: 'Flatten', units: 0, activation: 'linear', shape: 'Aplanamiento' },
+  { id: 'output-1', type: 'Dense', units: 2, activation: 'softmax', shape: '2 clases de salida' },
+]
+
+export default function Architectures({ projects, onSave }: {
+  projects: Project[]
+  onSave: (projectId: string, config: CnnArchitecture) => Promise<void>
+}) {
+  const [layers, setLayers] = useState<Layer[]>(initialLayers)
+  const [selected, setSelected] = useState(initialLayers[0].id)
+  const [projectId, setProjectId] = useState(projects[0]?.id || '')
+  const [name, setName] = useState('CNN de clasificación')
+  const [height, setHeight] = useState(64)
+  const [width, setWidth] = useState(64)
+  const [channels, setChannels] = useState<1 | 3 | 4>(3)
+  const [notice, setNotice] = useState('')
+  const [saving, setSaving] = useState(false)
+  const active = layers.find(layer => layer.id === selected)
+  const parameters = useMemo(() => layers.reduce((sum, layer) => sum + (layer.filters || layer.units), 0), [layers])
+
+  function updateLayer(id: string, patch: Partial<Layer>) {
+    setLayers(current => current.map(layer => layer.id === id ? { ...layer, ...patch } : layer))
+    setNotice('')
+  }
+
+  function addLayer() {
+    const id = `conv-${crypto.randomUUID()}`
+    const layer: Layer = { id, type: 'Conv2D', units: 32, filters: 32, kernelSize: 3, activation: 'relu', shape: '32 filtros · kernel 3×3' }
+    const flattenIndex = layers.findIndex(item => item.type === 'Flatten')
+    setLayers(current => [...current.slice(0, flattenIndex), layer, ...current.slice(flattenIndex)])
+    setSelected(id)
+  }
+
+  function removeLayer(id: string) {
+    if (layers.length <= 3) {
+      setNotice('Conserva al menos una capa convolucional, Flatten y una salida Dense.')
+      return
+    }
+    setLayers(current => current.filter(layer => layer.id !== id))
+    setSelected(layers.find(layer => layer.id !== id)?.id || '')
+    setNotice('')
+  }
+
+  async function save() {
+    if (!projectId) {
+      setNotice('Crea o selecciona un proyecto antes de guardar la CNN.')
+      return
+    }
+    if (layers[0]?.type !== 'Conv2D' || layers.filter(layer => layer.type === 'Flatten').length !== 1 || layers[layers.length - 1]?.type !== 'Dense') {
+      setNotice('La CNN debe iniciar con Conv2D, tener un Flatten y terminar con una salida Dense.')
+      return
+    }
+    const output = layers[layers.length - 1]
+    if (!output || output.units < 2) {
+      setNotice('La capa Dense final debe tener al menos 2 unidades, una por clase.')
+      return
+    }
+    setSaving(true)
+    setNotice('')
+    try {
+      const config: CnnArchitecture = {
+        name: name.trim() || 'CNN de clasificación',
+        input_height: height,
+        input_width: width,
+        input_channels: channels,
+        layers: layers.map(layer => ({
+          type: layer.type,
+          ...(layer.type === 'Conv2D' ? { filters: layer.filters, kernel_size: layer.kernelSize } : {}),
+          ...(layer.type === 'Dense' ? { units: layer.units } : {}),
+          ...(layer.type === 'Dropout' ? { rate: layer.rate ?? 0.25 } : {}),
+          activation: layer.activation as CnnArchitecture['layers'][number]['activation'],
+        })),
+      }
+      await onSave(projectId, config)
+      setNotice('Arquitectura CNN validada y guardada con versión.')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'No se pudo guardar la CNN.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return <div className="page-wrap">
+    <PageHeader eyebrow="M04 · CNN DESIGNER" title="Diseñador de CNN" description="Define entrada de imagen, capas convolucionales y salida por clase." action={<Button variant="secondary" onClick={() => {setLayers(initialLayers);setSelected(initialLayers[0].id);setNotice('Diseño CNN restablecido.')}} icon={<RotateCcw size={15}/>}>Restablecer</Button>}/>
+    <div className="designer-toolbar">
+      <label className="inline-select">Proyecto<select value={projectId} onChange={event => setProjectId(event.target.value)}>{projects.map(project => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label>
+      <span className="family-chip">CNN · Red convolucional</span>
+      <label className="inline-select">Nombre<input value={name} onChange={event => setName(event.target.value)} maxLength={160}/></label>
+    </div>
+    <div className="designer-grid">
+      <Card className="layers-panel">
+        <CardTitle title="Capas de la CNN" subtitle={`${layers.length} componentes`} action={<button className="small-icon-button" onClick={addLayer} aria-label="Agregar capa convolucional"><Plus size={16}/></button>}/>
+        <div className="layer-stack">{layers.map((layer, index) => <div key={layer.id}>
+          <button className={`layer-node ${selected === layer.id ? 'layer-selected' : ''}`} onClick={() => setSelected(layer.id)}>
+            <span className="layer-type-icon layer-type-hidden"><Layers3 size={16}/></span>
+            <span className="layer-node-copy"><b>{layer.type}</b><small>{layer.type === 'Conv2D' ? `${layer.filters} filtros · ${layer.activation}` : layer.type === 'Dense' ? `${layer.units} unidades · ${layer.activation}` : layer.shape}</small></span>
+            <span className="layer-index">{String(index + 1).padStart(2, '0')}</span>
+          </button>
+          {index < layers.length - 1 && <div className="layer-connector"><ArrowDown size={14}/></div>}
+        </div>)}</div>
+        <button className="add-layer-btn" onClick={addLayer}><Plus size={15}/> Añadir Conv2D</button>
+        <div className="layer-hint"><CircleHelp size={14}/> La API valida el orden y los parámetros antes de guardar.</div>
+      </Card>
+      <Card className="canvas-panel">
+        <CardTitle title="Vista de arquitectura CNN" subtitle="Flujo de procesamiento de imágenes" action={<Badge tone="blue">CNN</Badge>}/>
+        <div className="properties-form cnn-input-form">
+          <label>Alto (px)<input type="number" min="16" max="2048" value={height} onChange={event => setHeight(Number(event.target.value))}/></label>
+          <label>Ancho (px)<input type="number" min="16" max="2048" value={width} onChange={event => setWidth(Number(event.target.value))}/></label>
+          <label>Canales<select value={channels} onChange={event => setChannels(Number(event.target.value) as 1 | 3 | 4)}><option value="1">1 · escala de grises</option><option value="3">3 · RGB</option><option value="4">4 · RGBA</option></select></label>
+        </div>
+        <div className="architecture-canvas"><div className="canvas-grid-bg"/><div className="network-visual">{layers.map((layer, index) => <div className="network-col" key={layer.id}>
+          <span className="network-label">{layer.type}</span><div className="network-neurons">{Array.from({ length: Math.min(5, Math.max(2, layer.filters ? 5 : Math.ceil(layer.units / 8))) }, (_, neuron) => <span key={neuron} className={`network-neuron ${selected === layer.id ? 'neuron-selected' : ''}`} onClick={() => setSelected(layer.id)}/>)}</div>
+          <span className="network-units">{layer.filters ? `${layer.filters} filtros` : layer.units ? `${layer.units} unidades` : layer.shape}</span>
+          {index < layers.length - 1 && <div className="connection-lines">{Array.from({ length: 9 }, (_, line) => <i key={line} style={{ top: `${8 + line * 10}%`, transform: `rotate(${(line - 4) * 4}deg)` }}/>)}</div>}
+        </div>)}</div><div className="canvas-legend"><span><i className="legend-dot purple-dot"/> Capa seleccionada</span><span><i className="legend-line"/> Flujo CNN</span></div></div>
+        <div className="canvas-summary"><div><span>Modelo</span><b>CNN</b></div><div><span>Capas</span><b>{layers.length}</b></div><div><span>Parámetros*</span><b>{parameters.toLocaleString('es')}</b></div><div><span>Clases salida</span><b>{layers[layers.length - 1]?.units || 0}</b></div></div>
+        <p className="tiny-note">*Estimación preliminar. El recuento real lo calcula TensorFlow al construir el modelo.</p>
+      </Card>
+      <Card className="properties-panel">
+        <CardTitle title="Propiedades" subtitle={active?.type || 'Selecciona una capa'}/>
+        {active && <div className="properties-form">
+          {active.type === 'Conv2D' && <>
+            <label>Filtros<input type="number" min="1" max="512" value={active.filters || 32} onChange={event => updateLayer(active.id, { filters: Number(event.target.value) })}/></label>
+            <label>Kernel<input type="number" min="1" max="11" value={active.kernelSize || 3} onChange={event => updateLayer(active.id, { kernelSize: Number(event.target.value) })}/></label>
+            <label>Activación<select value={active.activation} onChange={event => updateLayer(active.id, { activation: event.target.value })}>{['relu','tanh','sigmoid','linear'].map(value => <option key={value}>{value}</option>)}</select></label>
+          </>}
+          {active.type === 'Dense' && <>
+            <label>Unidades / clases<input type="number" min="2" max="4096" value={active.units} onChange={event => updateLayer(active.id, { units: Number(event.target.value) })}/></label>
+            <label>Activación<select value={active.activation} onChange={event => updateLayer(active.id, { activation: event.target.value })}>{['softmax','relu','sigmoid','tanh','linear'].map(value => <option key={value}>{value}</option>)}</select></label>
+          </>}
+          {active.type === 'Dropout' && <label>Dropout<input type="number" min="0" max="0.8" step="0.05" value={active.rate ?? 0.25} onChange={event => updateLayer(active.id, { rate: Number(event.target.value) })}/></label>}
+          {active.type !== 'Flatten' && <div className="property-actions"><Button variant="danger" onClick={() => removeLayer(active.id)} icon={<Trash2 size={14}/>}>Eliminar capa</Button></div>}
+        </div>}
+        <div className="family-info"><b><CircleHelp size={14}/> Clasificación CNN</b><p>El ZIP debe contener carpetas por clase. La salida Dense debe tener exactamente tantas unidades como clases.</p></div>
+      </Card>
+    </div>
+    <div className="designer-footer"><div className="validation-message">{notice&&<><span className="validation-ok"><Check size={15}/></span>{notice}</>}</div><div className="footer-actions"><Button onClick={save} disabled={saving} icon={<Check size={15}/>}>{saving ? 'Guardando…' : 'Validar y guardar CNN'}</Button></div></div>
+  </div>
 }

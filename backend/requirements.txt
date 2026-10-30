@@ -1,0 +1,6 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+sqlalchemy>=2.0,<3
+python-multipart>=0.0.20,<1
+email-validator>=2.2,<3
+reportlab>=4.2,<5

@@ -4,8 +4,8 @@ import { Search, ChevronRight, Plus, Download, MoreHorizontal } from 'lucide-rea
 export function PageHeader({ eyebrow, title, description, action }: { eyebrow?: string; title: string; description?: string; action?: ReactNode }) {
   return <div className="page-header"><div><div className="eyebrow">{eyebrow || 'NEUROLAB WORKSPACE'}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{action && <div className="header-action">{action}</div>}</div>
 }
-export function Button({ children, variant = 'primary', onClick, icon, block = false, type = 'button' }: { children: ReactNode; variant?: 'primary'|'secondary'|'ghost'|'danger'; onClick?: () => void; icon?: ReactNode; block?: boolean; type?: 'button'|'submit' }) {
-  return <button type={type} className={`btn btn-${variant}${block ? ' btn-block' : ''}`} onClick={onClick}>{icon}{children}</button>
+export function Button({ children, variant = 'primary', onClick, icon, block = false, type = 'button', disabled = false }: { children: ReactNode; variant?: 'primary'|'secondary'|'ghost'|'danger'; onClick?: () => void; icon?: ReactNode; block?: boolean; type?: 'button'|'submit'; disabled?: boolean }) {
+  return <button type={type} disabled={disabled} className={`btn btn-${variant}${block ? ' btn-block' : ''}`} onClick={onClick}>{icon}{children}</button>
 }
 export function Badge({ children, tone = 'neutral' }: { children: ReactNode; tone?: 'neutral'|'green'|'blue'|'amber'|'red'|'purple' }) {
   return <span className={`badge badge-${tone}`}><span className="badge-dot" />{children}</span>
